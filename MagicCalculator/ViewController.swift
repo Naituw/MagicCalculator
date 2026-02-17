@@ -13,6 +13,7 @@ enum MagicState {
     case inputFirstNumber      // 等待输入第一个数字（4位数）
     case waitingSecondNumber   // 按了加号，等待开始输入第二个数字
     case inputSecondNumber     // 正在输入第二个数字
+    case showFirstResult       // 按了等号，显示 A+B 的结果，等待按加号
     case waitingMagicInput     // 按了加号，等待开始魔术输入
     case magicInput            // 魔术模式：无论按什么都显示魔术数字
     case showFinalResult       // 显示最终日期时间结果
@@ -22,7 +23,9 @@ class ViewController: UIViewController {
     
     // MARK: - UI Components
     private var displayLabel: UILabel!       // 显示主数字和表达式
+    private var secondsLabel: UILabel!       // 角落显示当前秒数
     private var buttons: [[UIButton]] = []
+    private var secondsTimer: Timer?
     
     // MARK: - Calculator State
     private var currentState: MagicState = .inputFirstNumber
@@ -54,6 +57,7 @@ class ViewController: UIViewController {
         setupUI()
         setupMotionDetection()
         setupGestureRecognizer()
+        startSecondsTimer()
         lightImpact.prepare()
         notificationFeedback.prepare()
         heavyImpact.prepare()
@@ -62,6 +66,7 @@ class ViewController: UIViewController {
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         motionManager.stopDeviceMotionUpdates()
+        secondsTimer?.invalidate()
     }
     
     // MARK: - UI Setup
@@ -155,8 +160,20 @@ class ViewController: UIViewController {
             buttons.append(buttonRow)
         }
         
+        // 秒数标签（不明显，放在左上角安全区域内，避开圆角）
+        secondsLabel = UILabel()
+        secondsLabel.text = ""
+        secondsLabel.textColor = UIColor(white: 0.2, alpha: 1)
+        secondsLabel.font = UIFont.monospacedDigitSystemFont(ofSize: 14, weight: .regular)
+        secondsLabel.textAlignment = .left
+        secondsLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(secondsLabel)
+        
         // 布局约束
         NSLayoutConstraint.activate([
+            secondsLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            secondsLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 4),
+            
             displayLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
             displayLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
             displayLabel.bottomAnchor.constraint(equalTo: buttonContainer.topAnchor, constant: -16),
@@ -167,6 +184,20 @@ class ViewController: UIViewController {
             buttonContainer.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -8),
             buttonContainer.heightAnchor.constraint(equalToConstant: CGFloat(buttonTitles.count) * (buttonSize + spacing) - spacing)
         ])
+    }
+    
+    // MARK: - Seconds Timer
+    
+    private func startSecondsTimer() {
+        updateSecondsLabel()
+        secondsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.updateSecondsLabel()
+        }
+    }
+    
+    private func updateSecondsLabel() {
+        let seconds = Calendar.current.component(.second, from: Date())
+        secondsLabel.text = String(format: ":%02d", seconds)
     }
     
     // MARK: - Motion Detection
@@ -294,6 +325,10 @@ class ViewController: UIViewController {
             currentInputValue += digit
             displayText = formatNumber(firstNumber) + "+" + currentInputValue
             
+        case .showFirstResult:
+            // 显示结果后按数字，不做任何事
+            break
+            
         case .waitingMagicInput:
             // 开始魔术输入
             currentState = .magicInput
@@ -353,6 +388,13 @@ class ViewController: UIViewController {
             currentInputValue = "0"
             currentState = .waitingMagicInput
             
+        case .showFirstResult:
+            // 显示结果后按加号，准备魔术输入
+            prepareMagicNumber()
+            displayText = formatNumber(sumResult) + "+"
+            currentInputValue = "0"
+            currentState = .waitingMagicInput
+            
         case .waitingMagicInput:
             // 已经在等待魔术输入，忽略
             break
@@ -378,14 +420,16 @@ class ViewController: UIViewController {
             break
             
         case .inputSecondNumber:
-            // 计算 A + B 并显示结果
+            // 计算 A + B 并显示结果，等待按加号进入魔术模式
             secondNumber = Int(currentInputValue) ?? 0
             sumResult = firstNumber + secondNumber
             displayText = formatNumber(sumResult)
             currentInputValue = String(sumResult)
-            // 准备魔术数字（为下一步做准备）
-            prepareMagicNumber()
-            currentState = .waitingMagicInput
+            currentState = .showFirstResult
+            
+        case .showFirstResult:
+            // 显示结果后按等号，忽略
+            break
             
         case .waitingMagicInput:
             // 等待魔术输入时按等号，忽略
@@ -445,9 +489,14 @@ class ViewController: UIViewController {
                 currentState = .waitingSecondNumber
             }
             
+        case .showFirstResult:
+            // 显示结果后退格，忽略
+            break
+            
         case .waitingMagicInput:
             // 退格回到显示结果状态
             displayText = formatNumber(sumResult)
+            currentState = .showFirstResult
             
         case .magicInput:
             // 魔术模式下忽略退格
@@ -466,14 +515,21 @@ class ViewController: UIViewController {
     
     /// 生成目标数字（当前日期+时间）
     /// 例如：2月16日14:18 → 2161418
+    /// 如果当前秒数 > 30，则按下一分钟计算（避免操作到一半跨分钟）
     private func generateTargetNumber() -> Int {
         let calendar = Calendar.current
-        let now = Date()
+        var targetDate = Date()
         
-        let month = calendar.component(.month, from: now)
-        let day = calendar.component(.day, from: now)
-        let hour = calendar.component(.hour, from: now)
-        let minute = calendar.component(.minute, from: now)
+        let seconds = calendar.component(.second, from: targetDate)
+        if seconds > 30 {
+            // 秒数大于30，往后推一分钟
+            targetDate = calendar.date(byAdding: .minute, value: 1, to: targetDate) ?? targetDate
+        }
+        
+        let month = calendar.component(.month, from: targetDate)
+        let day = calendar.component(.day, from: targetDate)
+        let hour = calendar.component(.hour, from: targetDate)
+        let minute = calendar.component(.minute, from: targetDate)
         
         // 组合成目标数字: 月日时分
         // 例如: 2月16日14:18 → 2161418
