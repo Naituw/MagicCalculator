@@ -11,8 +11,9 @@ import CoreMotion
 /// 魔术计算器的状态机
 enum MagicState {
     case inputFirstNumber      // 等待输入第一个数字（4位数）
-    case inputSecondNumber     // 等待输入第二个数字（5位数）
-    case showFirstResult       // 显示 A+B 的结果
+    case waitingSecondNumber   // 按了加号，等待开始输入第二个数字
+    case inputSecondNumber     // 正在输入第二个数字
+    case waitingMagicInput     // 按了加号，等待开始魔术输入
     case magicInput            // 魔术模式：无论按什么都显示魔术数字
     case showFinalResult       // 显示最终日期时间结果
 }
@@ -20,14 +21,13 @@ enum MagicState {
 class ViewController: UIViewController {
     
     // MARK: - UI Components
-    private var expressionLabel: UILabel!   // 显示表达式（如 89,502+2,072,725）
-    private var displayLabel: UILabel!       // 显示主数字
+    private var displayLabel: UILabel!       // 显示主数字和表达式
     private var buttons: [[UIButton]] = []
     
     // MARK: - Calculator State
     private var currentState: MagicState = .inputFirstNumber
-    private var displayValue: String = "0"
-    private var expressionText: String = ""  // 表达式文本
+    private var displayText: String = "0"    // 当前显示的完整文本
+    private var currentInputValue: String = "0"  // 当前正在输入的数字
     private var firstNumber: Int = 0           // 观众A的4位数
     private var secondNumber: Int = 0          // 观众B的5位数
     private var sumResult: Int = 0             // A + B 的结果
@@ -40,12 +40,12 @@ class ViewController: UIViewController {
     private var isScreenFacingDown: Bool = false
     
     // MARK: - Haptic Feedback
-    private let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
+    private let lightImpact = UIImpactFeedbackGenerator(style: .light)      // 轻触反馈（普通输入）
     private let notificationFeedback = UINotificationFeedbackGenerator()
-    private let heavyImpact = UIImpactFeedbackGenerator(style: .heavy)
+    private let heavyImpact = UIImpactFeedbackGenerator(style: .heavy)      // 强烈反馈（魔术提示）
     
-    // 魔术数字输入达到多少位时发出反馈
-    private let hapticThreshold = 5
+    // 是否已经输入完所有魔术数字（根据 magicDigits.count 动态决定）
+    private var magicInputReady: Bool = false
     
     // MARK: - Lifecycle
     
@@ -53,7 +53,8 @@ class ViewController: UIViewController {
         super.viewDidLoad()
         setupUI()
         setupMotionDetection()
-        impactFeedback.prepare()
+        setupGestureRecognizer()
+        lightImpact.prepare()
         notificationFeedback.prepare()
         heavyImpact.prepare()
     }
@@ -68,15 +69,6 @@ class ViewController: UIViewController {
     private func setupUI() {
         view.backgroundColor = .black
         
-        // 表达式标签（小字，显示在上方）
-        expressionLabel = UILabel()
-        expressionLabel.text = ""
-        expressionLabel.textColor = UIColor(white: 0.6, alpha: 1)
-        expressionLabel.font = UIFont.systemFont(ofSize: 28, weight: .regular)
-        expressionLabel.textAlignment = .right
-        expressionLabel.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(expressionLabel)
-        
         // 主显示屏
         displayLabel = UILabel()
         displayLabel.text = "0"
@@ -85,6 +77,7 @@ class ViewController: UIViewController {
         displayLabel.textAlignment = .right
         displayLabel.adjustsFontSizeToFitWidth = true
         displayLabel.minimumScaleFactor = 0.3
+        displayLabel.numberOfLines = 1
         displayLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(displayLabel)
         
@@ -164,10 +157,6 @@ class ViewController: UIViewController {
         
         // 布局约束
         NSLayoutConstraint.activate([
-            expressionLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
-            expressionLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
-            expressionLabel.bottomAnchor.constraint(equalTo: displayLabel.topAnchor, constant: -4),
-            
             displayLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
             displayLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
             displayLabel.bottomAnchor.constraint(equalTo: buttonContainer.topAnchor, constant: -16),
@@ -198,14 +187,68 @@ class ViewController: UIViewController {
         }
     }
     
+    // MARK: - Gesture Recognizer
+    
+    private func setupGestureRecognizer() {
+        // 添加点击手势识别器，覆盖整个屏幕
+        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(screenTapped(_:)))
+        // 在魔术模式下需要拦截所有点击，所以默认 cancelsTouchesInView = true
+        view.addGestureRecognizer(tapGesture)
+    }
+    
+    @objc private func screenTapped(_ gesture: UITapGestureRecognizer) {
+        // 在魔术输入模式且屏幕朝下时，点击屏幕任何位置都输入数字
+        if (currentState == .magicInput || currentState == .waitingMagicInput) && isScreenFacingDown {
+            // 触发反馈
+            if magicInputReady {
+                heavyImpact.impactOccurred()
+            } else {
+                lightImpact.impactOccurred()
+            }
+            
+            // 输入魔术数字
+            handleNumberInput("")  // 传入空字符串，反正魔术模式下会忽略
+            updateDisplay()
+            return
+        }
+        
+        // 非魔术模式下，检查是否点击在按钮上
+        let location = gesture.location(in: view)
+        for buttonRow in buttons {
+            for button in buttonRow {
+                if button.frame.contains(view.convert(location, to: button.superview)) {
+                    // 点击在按钮上，手动触发按钮点击
+                    buttonTapped(button)
+                    return
+                }
+            }
+        }
+        
+        // 点击在空白区域，什么都不做
+    }
+    
     // MARK: - Button Actions
     
     @objc private func buttonTapped(_ sender: UIButton) {
         guard let title = sender.currentTitle else { return }
         
-        // 按钮点击反馈
-        impactFeedback.impactOccurred()
+        // 根据状态决定触觉反馈
+        if magicInputReady {
+            // 魔术输入就绪，每次都发出强烈反馈
+            heavyImpact.impactOccurred()
+        } else {
+            // 普通输入，轻触反馈
+            lightImpact.impactOccurred()
+        }
         
+        // 在魔术输入模式且屏幕朝下时，所有按钮都视为输入数字
+        if (currentState == .magicInput || currentState == .waitingMagicInput) && isScreenFacingDown {
+            handleNumberInput(title)  // 无论按什么，都当作输入数字
+            updateDisplay()
+            return
+        }
+        
+        // 正常模式下的按钮处理
         switch title {
         case "0"..."9":
             handleNumberInput(title)
@@ -231,67 +274,88 @@ class ViewController: UIViewController {
     
     private func handleNumberInput(_ digit: String) {
         switch currentState {
-        case .inputFirstNumber, .inputSecondNumber:
-            // 正常输入模式
-            if displayValue == "0" {
-                displayValue = digit
+        case .inputFirstNumber:
+            // 正常输入第一个数字
+            if currentInputValue == "0" {
+                currentInputValue = digit
             } else {
-                displayValue += digit
+                currentInputValue += digit
             }
+            displayText = currentInputValue
             
-        case .showFirstResult:
-            // 显示结果后，如果按数字，不做任何事
-            break
+        case .waitingSecondNumber:
+            // 开始输入第二个数字，替换显示
+            currentInputValue = digit
+            displayText = formatNumber(firstNumber) + "+" + digit
+            currentState = .inputSecondNumber
+            
+        case .inputSecondNumber:
+            // 继续输入第二个数字
+            currentInputValue += digit
+            displayText = formatNumber(firstNumber) + "+" + currentInputValue
+            
+        case .waitingMagicInput:
+            // 开始魔术输入
+            currentState = .magicInput
+            currentMagicIndex = 0
+            fallthrough
             
         case .magicInput:
             // 魔术模式：无论按什么数字，都显示魔术数字的下一位
             if currentMagicIndex < magicDigits.count {
                 if currentMagicIndex == 0 {
-                    displayValue = String(magicDigits[currentMagicIndex])
+                    currentInputValue = String(magicDigits[currentMagicIndex])
                 } else {
-                    displayValue += String(magicDigits[currentMagicIndex])
+                    currentInputValue += String(magicDigits[currentMagicIndex])
                 }
                 currentMagicIndex += 1
+                displayText = formatNumber(sumResult) + "+" + currentInputValue
                 
-                // 当输入足够多位数时，发出 haptic 反馈
-                if currentMagicIndex >= hapticThreshold && currentMagicIndex == magicDigits.count {
-                    // 输入完成，发出成功反馈
+                // 当输入完所有魔术数字时，标记为就绪
+                if currentMagicIndex >= magicDigits.count && !magicInputReady {
+                    magicInputReady = true
+                    // 输入完成，发出成功提示（下一次按键开始会用 heavy 反馈）
                     notificationFeedback.notificationOccurred(.success)
-                } else if currentMagicIndex == hapticThreshold {
-                    // 达到阈值，发出强烈反馈提示可以按等号了
-                    heavyImpact.impactOccurred()
                 }
             }
-            // 如果已经显示完所有魔术数字，忽略更多输入
+            // 如果已经显示完所有魔术数字，继续发出 heavy 反馈但不增加数字
             
         case .showFinalResult:
             // 最终结果显示后，如果按数字，重置
             resetCalculator()
-            displayValue = digit
+            currentInputValue = digit
+            displayText = digit
         }
     }
     
     private func handlePlus() {
         switch currentState {
         case .inputFirstNumber:
-            // 保存第一个数字，切换到输入第二个数字
-            firstNumber = Int(displayValue) ?? 0
-            // 显示表达式：数字+
-            expressionText = formatNumber(firstNumber) + "+"
-            displayValue = "0"
-            currentState = .inputSecondNumber
+            // 保存第一个数字，显示加号
+            firstNumber = Int(currentInputValue) ?? 0
+            displayText = formatNumber(firstNumber) + "+"
+            currentInputValue = "0"
+            currentState = .waitingSecondNumber
             
-        case .inputSecondNumber:
-            // 不应该在这里按加号，忽略
+        case .waitingSecondNumber:
+            // 已经按了加号，忽略重复按加号
             break
             
-        case .showFirstResult:
-            // 准备魔术输入
+        case .inputSecondNumber:
+            // 按加号相当于"等号+加号"的效果
+            // 先计算 A + B
+            secondNumber = Int(currentInputValue) ?? 0
+            sumResult = firstNumber + secondNumber
+            // 准备魔术数字
             prepareMagicNumber()
-            // 显示表达式：结果+
-            expressionText = formatNumber(sumResult) + "+"
-            displayValue = "0"
-            currentState = .magicInput
+            // 显示结果+加号
+            displayText = formatNumber(sumResult) + "+"
+            currentInputValue = "0"
+            currentState = .waitingMagicInput
+            
+        case .waitingMagicInput:
+            // 已经在等待魔术输入，忽略
+            break
             
         case .magicInput:
             // 魔术模式下忽略加号
@@ -309,17 +373,22 @@ class ViewController: UIViewController {
             // 只输入了一个数字，忽略
             break
             
-        case .inputSecondNumber:
-            // 计算 A + B
-            secondNumber = Int(displayValue) ?? 0
-            sumResult = firstNumber + secondNumber
-            // 显示表达式
-            expressionText = formatNumber(firstNumber) + "+" + formatNumber(secondNumber)
-            displayValue = String(sumResult)
-            currentState = .showFirstResult
+        case .waitingSecondNumber:
+            // 按了加号但还没输入数字，忽略
+            break
             
-        case .showFirstResult:
-            // 显示结果后按等号，忽略
+        case .inputSecondNumber:
+            // 计算 A + B 并显示结果
+            secondNumber = Int(currentInputValue) ?? 0
+            sumResult = firstNumber + secondNumber
+            displayText = formatNumber(sumResult)
+            currentInputValue = String(sumResult)
+            // 准备魔术数字（为下一步做准备）
+            prepareMagicNumber()
+            currentState = .waitingMagicInput
+            
+        case .waitingMagicInput:
+            // 等待魔术输入时按等号，忽略
             break
             
         case .magicInput:
@@ -332,11 +401,9 @@ class ViewController: UIViewController {
             
             // 显示最终日期时间结果
             let targetNumber = generateTargetNumber()
-            let magicInputValue = Int(displayValue) ?? 0
-            // 显示表达式
-            expressionText = formatNumber(sumResult) + "+" + formatNumber(magicInputValue)
-            displayValue = String(targetNumber)
+            displayText = formatNumber(targetNumber)
             currentState = .showFinalResult
+            magicInputReady = false
             
             // 成功完成魔术，强烈反馈
             notificationFeedback.notificationOccurred(.success)
@@ -353,16 +420,40 @@ class ViewController: UIViewController {
     
     private func handleBackspace() {
         switch currentState {
-        case .inputFirstNumber, .inputSecondNumber:
-            if displayValue.count > 1 {
-                displayValue.removeLast()
+        case .inputFirstNumber:
+            if currentInputValue.count > 1 {
+                currentInputValue.removeLast()
             } else {
-                displayValue = "0"
+                currentInputValue = "0"
             }
+            displayText = currentInputValue
+            
+        case .waitingSecondNumber:
+            // 退格回到输入第一个数字的状态
+            currentInputValue = String(firstNumber)
+            displayText = currentInputValue
+            currentState = .inputFirstNumber
+            
+        case .inputSecondNumber:
+            if currentInputValue.count > 1 {
+                currentInputValue.removeLast()
+                displayText = formatNumber(firstNumber) + "+" + currentInputValue
+            } else {
+                // 退格到等待输入状态
+                currentInputValue = "0"
+                displayText = formatNumber(firstNumber) + "+"
+                currentState = .waitingSecondNumber
+            }
+            
+        case .waitingMagicInput:
+            // 退格回到显示结果状态
+            displayText = formatNumber(sumResult)
+            
         case .magicInput:
             // 魔术模式下忽略退格
             break
-        default:
+            
+        case .showFinalResult:
             break
         }
     }
@@ -411,39 +502,32 @@ class ViewController: UIViewController {
         
         // 如果魔术数字是负数，我们需要处理（但正常情况下不应该发生）
         if magicNumber < 0 {
-            // 这种情况说明 A+B 已经大于目标数字了
-            // 可以考虑显示错误或者用其他方式处理
             print("Warning: Magic number is negative! A+B is too large.")
         }
         
         currentMagicIndex = 0
+        magicInputReady = false
     }
     
     /// 重置计算器
     private func resetCalculator() {
         currentState = .inputFirstNumber
-        displayValue = "0"
-        expressionText = ""
+        displayText = "0"
+        currentInputValue = "0"
         firstNumber = 0
         secondNumber = 0
         sumResult = 0
         magicNumber = 0
         magicDigits = []
         currentMagicIndex = 0
+        magicInputReady = false
     }
     
     // MARK: - Display
     
     private func updateDisplay() {
-        // 更新表达式标签
-        expressionLabel.text = expressionText
-        
-        // 格式化主显示，添加千位分隔符
-        if let number = Int(displayValue) {
-            displayLabel.text = formatNumber(number)
-        } else {
-            displayLabel.text = displayValue
-        }
+        // 格式化显示
+        displayLabel.text = displayText
     }
     
     /// 格式化数字，添加千位分隔符
